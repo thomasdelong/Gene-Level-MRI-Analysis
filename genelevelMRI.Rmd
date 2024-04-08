@@ -1,0 +1,663 @@
+```{r}
+library(limma)
+library(tidyverse)
+library(corrplot)
+
+```
+
+```{r}
+rosmapAD_T1 <- read_csv("/external/rprshnas01/kcni/tdelong/ROSMAP/data/rosmapAD_data_imaging_T1_ROSMAP_freesurfer_output.csv") %>%
+  mutate(projid = sub("^sub-", "", SubjectID)) %>%
+  mutate(projid = sub("_ses-.*$", "", projid)) %>%
+  mutate(session_number = as.numeric(gsub('.*_ses-(\\d+)$', '\\1', SubjectID))) %>%
+  group_by(patient_id = sub('-ses-\\d+$', '', projid)) %>%
+  filter(session_number == max(session_number)) %>%
+  dplyr::select(-session_number, -...1, -SubjectID, -patient_id) %>%
+  ungroup() %>%
+  dplyr::select(which(!apply(is.na(.), 2, all)))
+RNAseq_Harmonization_ROSMAP_combined_metadata <- read.csv(file = '/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Metadata/RNAseq_Harmonization_ROSMAP_combined_metadata.csv')
+synapsetospecimen <- read_csv("/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch1_Stranded/ROSMAP_batch1_provenance.csv")
+batch1 <- read.delim('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch1_Stranded/ROSMAP_batch1_gene_all_counts_matrix.txt') %>%
+  dplyr::slice(-(1:4)) %>%
+  dplyr::select(-(48)) %>% #duplicate ID in synapsetospecimen
+  rename_with(~ifelse(is.na(match(., synapsetospecimen$id)), ., synapsetospecimen$specimenID[match(., synapsetospecimen$id)]), .cols = everything())
+synapsetospecimen <- read_csv("/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch2_Stranded/ROSMAP_batch2_provenance.csv")
+batch2 <- read.delim('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch2_Stranded/ROSMAP_batch2_gene_all_counts_matrix.txt') %>%
+  dplyr::slice(-(1:4)) %>%
+  rename_with(~ifelse(is.na(match(., synapsetospecimen$id)), ., synapsetospecimen$specimenID[match(., synapsetospecimen$id)]), .cols = everything())
+batch1 <- left_join(batch1, batch2, by='feature')
+synapsetospecimen <- read_csv("/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch3_Stranded/ROSMAP_batch3_provenance.csv")
+batch3 <- read.delim('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch3_Stranded/ROSMAP_batch3_gene_all_counts_matrix.txt') %>%
+  dplyr::slice(-(1:4)) %>%
+  rename_with(~ifelse(is.na(match(., synapsetospecimen$id)), ., synapsetospecimen$specimenID[match(., synapsetospecimen$id)]), .cols = everything())
+batch1 <- left_join(batch1, batch3, by='feature')
+synapsetospecimen <- read_csv("/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch4_Stranded/ROSMAP_batch4_provenance.csv")
+batch4 <- read.delim('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch4_Stranded/ROSMAP_batch4_gene_all_counts_matrix.txt') %>%
+  dplyr::slice(-(1:4)) %>%
+  rename_with(~ifelse(is.na(match(., synapsetospecimen$id)), ., synapsetospecimen$specimenID[match(., synapsetospecimen$id)]), .cols = everything())
+batch1 <- left_join(batch1, batch4, by='feature')
+
+
+#ensembl to gene id
+mart = useMart(biomart = "ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/") 
+ensembl = getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id","description","gene_biotype","percentage_gene_gc_content"), mart = mart) 
+ensembl_to_gene = (data.frame(ensembl$ensembl_gene_id, ensembl$hgnc_symbol))
+names(ensembl_to_gene) = c("feature", "gene_symbol")
+#remove duplicates
+ensembl_to_gene = ensembl_to_gene[!duplicated(ensembl_to_gene[,1]),]
+
+
+# import tech covariates during alignment
+batch1_star = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch1_Stranded/ROSMAP_batch1_Star_Log_Merged_clean.txt', header = T, sep = '\t')
+batch2_star = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch2_Stranded/ROSMAP_batch2_Star_Log_Merged_clean.txt', header = T, sep = '\t')
+batch3_star = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch3_Stranded/ROSMAP_batch3_Star_Log_Merged_clean.txt', header = T, sep = '\t')
+batch4_star = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch4_Stranded/ROSMAP_batch4_Star_Log_Merged_clean.txt', header = T, sep = '\t')
+star_meta = bind_rows(list(batch1_star, batch2_star, batch3_star, batch4_star))
+colnames(star_meta)[1] = "specimenID"
+batch1_align = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch1_Stranded/ROSMAP_batch1_Study_all_metrics_matrix_clean.txt', header = T, sep = '\t')
+batch2_align = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch2_Stranded/ROSMAP_batch2_Study_all_metrics_matrix_clean.txt', header = T, sep = '\t')
+batch3_align = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch3_Stranded/ROSMAP_batch3_Study_all_metrics_matrix_clean.txt', header = T, sep = '\t')
+batch4_align = read.table('/external/rprshnas01/external_data/rosmap/gene_expression/RNAseq_Harmonization/Gene Expression (Raw Gene Counts)/Rosmap_Gene_Quantification/Rosmap_Batch4_Stranded/ROSMAP_batch4_Study_all_metrics_matrix_clean.txt', header = T, sep = '\t')
+align_meta = bind_rows(list(batch1_align, batch2_align, batch3_align, batch4_align))
+colnames(align_meta)[1] = "specimenID"
+
+rosmap_meta = left_join(RNAseq_Harmonization_ROSMAP_combined_metadata %>% filter(assay == 'rnaSeq'), star_meta, by = 'specimenID') 
+rosmap_meta = left_join(rosmap_meta %>% filter(assay == 'rnaSeq'), align_meta, by = 'specimenID') 
+```
+```{r}
+num_columns <- sapply(rosmap_meta, is.numeric)
+typeof(rosmap_meta[["msex"]][1])
+rosmap_meta <- rosmap_meta[complete.cases(rosmap_meta$educ),]
+rosmap_meta <- rosmap_meta[complete.cases(rosmap_meta$cogdx),]
+rosmap_meta$X..of.reads.unmapped..too.short <- as.numeric(gsub("%", "", rosmap_meta$X..of.reads.unmapped..too.short))
+metacor <- cor(rosmap_meta[, c("AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED",
+                               "RnaSeqMetrics__MEDIAN_5PRIME_BIAS",
+                               "RnaSeqMetrics__PCT_INTERGENIC_BASES",
+                               "Average.mapped.length",
+                               "Mapping.speed..Million.of.reads.per.hour",
+                               "X..of.reads.unmapped..too.short",
+                               "AlignmentSummaryMetrics__PF_READS_ALIGNED",
+                               "RnaSeqMetrics__PCT_UTR_BASES",
+                               #"sequencingBatch",
+                               "msex",
+                               "cogdx",
+                               "educ",
+                               "race"
+                               )],
+               method = "spearman")
+corrplot(metacor, 
+         method = 'color',
+         tl.cex = 0.5)
+
+dendrogram <- hclust(as.dist(1 - metacor), method = "complete")
+plot(dendrogram, main = "Correlation Dendrogram", xlab = "Variables", ylab = "Distance", cex = 0.65)
+
+ggdendrogram(dendrogram)
+```
+
+```{r}
+rna <- batch1
+rna$feature <- sub("\\..*$", "", rna$feature)
+#rna2 <- merge(ensembl_to_gene, rna, by = 'feature', all.y = T) %>%
+#  dplyr::select(-1)
+
+# medexp <- rna2[-1] %>%
+#   unlist %>% 
+#   median
+# rna2 <- mostVariable(rna2,
+#                                     genes = 'gene_symbol',
+#                                     threshold = medexp,
+#                                     threshFun = median)
+
+rna <- rna[!duplicated(rna$feature),] %>%
+  na.omit()
+rownames(rna) <- rna$feature
+rna$feature <- NULL
+cutoff <- 10
+drop <- which(apply(cpm(rna), 1, max) < cutoff)
+rna2 <- rna[-drop,] 
+```
+quantile cutoff
+```{r}
+rna <- batch1
+rna$feature <- sub("\\..*$", "", rna$feature)
+rna <- rna[!duplicated(rna$feature),] %>%
+  na.omit()
+rownames(rna) <- rna$feature
+rna$feature <- NULL
+
+cpm_values <- cpm(rna)
+
+tenth_percentile <- quantile(cpm_values, probs = 0.1)
+
+lowcpm <- rownames(rna)[cpm_values <= tenth_percentile]
+
+rna2 <- rna[!rownames(rna) %in% lowcpm, ]
+```
+
+```{r}
+merged_metadata_mri <- merge(rosmap_meta, rosmapAD_T1, by = "projid")
+merged_metadata_mri <- merged_metadata_mri[!duplicated(merged_metadata_mri$specimenID), ]
+merged_metadata_mri <- merged_metadata_mri[!is.na(merged_metadata_mri$cogdx), ] %>%
+  subset(tissue == 'posterior cingulate cortex')
+merged_metadata_mri[, 113:length(merged_metadata_mri)] <- scale(merged_metadata_mri[, 113:length(merged_metadata_mri)])
+merged_metadata_mri$sequencingBatch <- as.factor(merged_metadata_mri$sequencingBatch)
+
+
+rownames(merged_metadata_mri) <- merged_metadata_mri$specimenID
+genedata <- rna2
+
+common_specimenID <- intersect(colnames(genedata), merged_metadata_mri$specimenID)
+genedata_pcc <- genedata[, common_specimenID, drop = FALSE]
+merged_pcc <- merged_metadata_mri[common_specimenID, , drop=FALSE]
+
+merged_metadata_mri <- merge(rosmap_meta, rosmapAD_T1, by = "projid")
+merged_metadata_mri <- merged_metadata_mri[!duplicated(merged_metadata_mri$specimenID), ]
+merged_metadata_mri <- merged_metadata_mri[!is.na(merged_metadata_mri$cogdx), ] %>%
+  subset(tissue == 'dorsolateral prefrontal cortex')
+merged_metadata_mri[, 113:length(merged_metadata_mri)] <- scale(merged_metadata_mri[, 113:length(merged_metadata_mri)])
+merged_metadata_mri$sequencingBatch <- as.factor(merged_metadata_mri$sequencingBatch)
+
+
+rownames(merged_metadata_mri) <- merged_metadata_mri$specimenID
+genedata <- rna2
+
+common_specimenID <- intersect(colnames(genedata), merged_metadata_mri$specimenID)
+genedata_dlpfc <- genedata[, common_specimenID, drop = FALSE]
+merged_dlpfc <- merged_metadata_mri[common_specimenID, , drop=FALSE]
+
+avg_exp_pcc <- rowMeans(genedata_pcc)
+avg_exp_dlpfc <- rowMeans(genedata_dlpfc)
+avg_pcc_vs_dlpfc <- merge(avg_exp_pcc, avg_exp_dlpfc, by = 'row.names')
+colnames(avg_pcc_vs_dlpfc)<- c('gene','PCCavg','DLPFCavg')
+
+ggplot(avg_pcc_vs_dlpfc, aes(x=PCCavg, y=DLPFCavg))+
+  geom_point()+
+  geom_smooth(method='lm',se=FALSE)+
+  xlab('log10 average gene expression - PCC')+
+  ylab('log10 average gene expression - DLPFC')+
+  scale_x_log10()+
+  scale_y_log10()
+
+model <- lm(data=avg_pcc_vs_dlpfc, formula = PCCavg ~ DLPFCavg)
+summary(model)
+
+avg_pcc_vs_dlpfc$residuals <- resid(model)
+threshold <- 2*sd(avg_pcc_vs_dlpfc$residuals)
+outliers <- avg_pcc_vs_dlpfc[abs(avg_pcc_vs_dlpfc$residuals) > threshold, ]
+outliers <- merge(ensembl_to_gene, outliers, by.x = 'feature', by.y = 'gene', all.y = T)
+```
+
+```{r}
+batchadjusted <- as.data.frame(removeBatchEffect(genedata, batch = merged_metadata_mri$sequencingBatch))
+before_after_adjustment <- as.data.frame(t(rbind(genedata[c('ENSG00000157005'),],batchadjusted[c('ENSG00000157005'),])))
+
+ggplot(data=before_after_adjustment, aes(x=ENSG00000157005, y=ENSG000001570051))+
+         geom_point()
+```
+```{r}
+merged_metadata_mri <- merge(rosmap_meta, rosmapAD_T1, by = "projid")
+merged_metadata_mri <- merged_metadata_mri[!duplicated(merged_metadata_mri$specimenID), ]
+merged_metadata_mri <- merged_metadata_mri[!is.na(merged_metadata_mri$cogdx), ] %>%
+  subset(tissue == 'dorsolateral prefrontal cortex')
+merged_metadata_mri[, 113:length(merged_metadata_mri)] <- scale(merged_metadata_mri[, 113:length(merged_metadata_mri)])
+merged_metadata_mri$sequencingBatch <- as.factor(merged_metadata_mri$sequencingBatch)
+
+
+rownames(merged_metadata_mri) <- merged_metadata_mri$specimenID
+genedata <- rna2
+
+common_specimenID <- intersect(colnames(genedata), merged_metadata_mri$specimenID)
+genedata <- genedata[, common_specimenID, drop = FALSE]
+merged_metadata_mri <- merged_metadata_mri[common_specimenID, , drop=FALSE]
+
+
+design <- model.matrix(~ Right_ThickAvg_DKT_parstriangularis +
+                         AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED +
+                         RnaSeqMetrics__PCT_INTERGENIC_BASES +
+                         msex +
+                         cogdx +
+                         sequencingBatch
+                       , data = merged_metadata_mri)
+
+
+y <- voom(genedata, design, plot = T)
+
+fit <- lmFit(y, design = design)
+
+
+# 
+# contrast_matrix <- makeContrasts(
+#   Right_ThickAvg_DKT_parstriangularis = 
+#     Right_ThickAvg_DKT_parstriangularis - mean(Right_ThickAvg_DKT_parstriangularis),
+#   #msex = msex - mean(msex),
+#   #educ = educ - mean(educ),
+#   levels = design
+# )
+
+# fit <- contrasts.fit(fit, contrast_matrix)
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_ThickAvg_DKT_parstriangularis", number = nrow(genedata))
+DLPFCresults <- results
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right Parstriangularis Thickness") + 
+  theme_minimal()
+
+significantresults <- subset(results, adj.P.Val < 0.05)
+
+gene_symbol_map <- setNames(ensembl_to_gene$gene_symbol, ensembl_to_gene$feature)
+row_names <- rownames(significantresults)
+gene_symbols <- gene_symbol_map[row_names]
+significantresults$gene_symbol <- gene_symbols
+
+##############################
+merged_metadata_mri <- merge(rosmap_meta, rosmapAD_T1, by = "projid")
+merged_metadata_mri <- merged_metadata_mri[!duplicated(merged_metadata_mri$specimenID), ]
+merged_metadata_mri <- merged_metadata_mri[!is.na(merged_metadata_mri$cogdx), ] %>%
+  subset(tissue == 'posterior cingulate cortex')
+merged_metadata_mri[, 113:length(merged_metadata_mri)] <- scale(merged_metadata_mri[, 113:length(merged_metadata_mri)])
+merged_metadata_mri$sequencingBatch <- as.factor(merged_metadata_mri$sequencingBatch)
+
+
+rownames(merged_metadata_mri) <- merged_metadata_mri$specimenID
+genedata <- rna2
+
+common_specimenID <- intersect(colnames(genedata), merged_metadata_mri$specimenID)
+genedata <- genedata[, common_specimenID, drop = FALSE]
+merged_metadata_mri <- merged_metadata_mri[common_specimenID, , drop=FALSE]
+
+
+design <- model.matrix(~ Right_ThickAvg_DKT_posteriorcingulate +
+                         AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED +
+                         RnaSeqMetrics__PCT_INTERGENIC_BASES +
+                         msex +
+                         cogdx +
+                         sequencingBatch
+                       , data = merged_metadata_mri)
+
+
+y <- voom(genedata, design, plot = T)
+
+fit <- lmFit(y, design = design)
+
+
+
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_ThickAvg_DKT_posteriorcingulate", number = nrow(genedata))
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+PCCresults <- results
+
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right Posterior Cingulate Thickness") + 
+  theme_minimal()
+
+significantresults <- subset(results, P.Value < 0.05)
+
+gene_symbol_map <- setNames(ensembl_to_gene$gene_symbol, ensembl_to_gene$feature)
+row_names <- rownames(significantresults)
+gene_symbols <- gene_symbol_map[row_names]
+significantresults$gene_symbol <- gene_symbols
+
+########################################
+PCCresults <- PCCresults %>%
+  rename(PCC.logFC = logFC)
+
+DLPFCresults <- DLPFCresults %>%
+  rename(DLPFC.logFC = logFC)
+
+# Bind dataframes by row names
+combined_results <- merge(PCCresults, DLPFCresults, by = 0)
+
+ggplot(combined_results, aes(x=PCC.logFC, y=DLPFC.logFC))+
+  geom_point()+
+  geom_smooth(method='lm')
+
+model <- lm(data = combined_results, formula = DLPFC.logFC ~ PCC.logFC)
+summary(model)
+```
+WITHIN DLPFC COMPARISON
+```{r}
+merged_metadata_mri <- merge(rosmap_meta, rosmapAD_T1, by = "projid")
+merged_metadata_mri <- merged_metadata_mri[!duplicated(merged_metadata_mri$specimenID), ]
+merged_metadata_mri <- merged_metadata_mri[!is.na(merged_metadata_mri$cogdx), ] %>%
+  subset(tissue == 'dorsolateral prefrontal cortex')
+merged_metadata_mri[, 113:length(merged_metadata_mri)] <- scale(merged_metadata_mri[, 113:length(merged_metadata_mri)])
+merged_metadata_mri$sequencingBatch <- as.factor(merged_metadata_mri$sequencingBatch)
+
+
+rownames(merged_metadata_mri) <- merged_metadata_mri$specimenID
+genedata <- rna2
+
+common_specimenID <- intersect(colnames(genedata), merged_metadata_mri$specimenID)
+genedata <- genedata[, common_specimenID, drop = FALSE]
+merged_metadata_mri <- merged_metadata_mri[common_specimenID, , drop=FALSE]
+
+
+design <- model.matrix(~ Right_ThickAvg_DKT_parstriangularis +
+                         AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED +
+                         RnaSeqMetrics__PCT_INTERGENIC_BASES +
+                         msex +
+                         cogdx +
+                         sequencingBatch
+                       , data = merged_metadata_mri)
+
+
+y <- voom(genedata, design, plot = T)
+
+fit <- lmFit(y, design = design)
+
+
+# 
+# contrast_matrix <- makeContrasts(
+#   Right_ThickAvg_DKT_parstriangularis = 
+#     Right_ThickAvg_DKT_parstriangularis - mean(Right_ThickAvg_DKT_parstriangularis),
+#   #msex = msex - mean(msex),
+#   #educ = educ - mean(educ),
+#   levels = design
+# )
+
+# fit <- contrasts.fit(fit, contrast_matrix)
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_ThickAvg_DKT_parstriangularis", number = nrow(genedata))
+results1 <- results
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right Parstriangularis Thickness") + 
+  theme_minimal()
+
+significantresults <- subset(results, adj.P.Val < 0.05)
+
+gene_symbol_map <- setNames(ensembl_to_gene$gene_symbol, ensembl_to_gene$feature)
+row_names <- rownames(significantresults)
+gene_symbols <- gene_symbol_map[row_names]
+significantresults$gene_symbol <- gene_symbols
+
+##############################
+
+design <- model.matrix(~ Right_SurfArea_DKT_parstriangularis +
+                         AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED +
+                         RnaSeqMetrics__PCT_INTERGENIC_BASES +
+                         msex +
+                         cogdx +
+                         sequencingBatch
+                       , data = merged_metadata_mri)
+
+
+y <- voom(genedata, design, plot = T)
+
+fit <- lmFit(y, design = design)
+
+
+
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_SurfArea_DKT_parstriangularis", number = nrow(genedata))
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+results2 <- results
+
+#results <- topTable(fit, coef = "cogdx", number = nrow(genedata))
+
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right ParsTriangularis Surface Area") + 
+  theme_minimal()
+
+significantresults <- subset(results, P.Value < 0.05)
+
+gene_symbol_map <- setNames(ensembl_to_gene$gene_symbol, ensembl_to_gene$feature)
+row_names <- rownames(significantresults)
+gene_symbols <- gene_symbol_map[row_names]
+significantresults$gene_symbol <- gene_symbols
+
+########################################
+results1 <- results1 %>%
+  rename(one.logFC = logFC)
+
+results2 <- results2 %>%
+  rename(two.logFC = logFC)
+
+# Bind dataframes by row names
+combined_results <- merge(results1, results2, by = 0)
+
+ggplot(combined_results, aes(x=one.logFC, y=two.logFC))+
+  geom_point()+
+  geom_smooth(method='lm')
+
+model <- lm(data = combined_results, formula = one.logFC ~ two.logFC)
+summary(model)
+```
+```{r}
+differences <- combined_results[c('Row.names', 'one.logFC', 'two.logFC')] %>%
+  merge(ensembl_to_gene, by.x = 'Row.names', by.y = 'feature')
+differences$dif <- differences$one.logFC - differences$two.logFC
+
+```
+```{r}
+test <- genedata[rownames(genedata) == 'ENSG00000188747',, drop = FALSE]
+test <- as.data.frame(t(test))
+merged_mri_with_test <- cbind(merged_metadata_mri, test)
+
+ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                 y=Right_SurfArea_DKT_parstriangularis))+
+  geom_point(aes(color = ENSG00000188747))+
+  scale_color_gradient(low = "gray", high = "red")+
+  #geom_smooth(method = 'lm')+
+  ggtitle('NOXA1, -0.4964708 logFC with thickness / 0.2618962 with surface area')
+ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                 y=ENSG00000188747))+
+  geom_smooth(method = 'lm')+
+  geom_point()+
+  scale_y_continuous(trans='log10')
+ggplot(merged_mri_with_test, aes(x=Right_SurfArea_DKT_parstriangularis, 
+                                 y=ENSG00000188747))+
+  geom_smooth(method = 'lm')+
+  geom_point()+
+  scale_y_continuous(trans='log10')
+```
+```{r}
+# of interest:ENSG00000243449 ENSG00000241261
+test <- genedata[rownames(genedata) == 'ENSG00000243449',, drop = FALSE]
+test <- as.data.frame(t(test))
+merged_mri_with_test <- cbind(merged_metadata_mri, test)
+
+ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                 y=Right_SurfArea_DKT_parstriangularis))+
+  geom_point(aes(color = ENSG00000243449))+
+  scale_color_gradient(low = "gray", high = "red")+
+  #geom_smooth(method = 'lm')+
+  ggtitle('')
+ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                 y=ENSG00000243449))+
+  geom_smooth(method = 'lm')+
+  geom_point()
+  #scale_y_continuous(trans='log10')
+ggplot(merged_mri_with_test, aes(x=Right_SurfArea_DKT_parstriangularis, 
+                                 y=ENSG00000243449))+
+  geom_smooth(method = 'lm')+
+  geom_point()
+  #scale_y_continuous(trans='log10')
+```
+```{r}
+test <- genedata[rownames(genedata) == 'ENSG00000243449',, drop = FALSE]
+test <- as.data.frame(t(test))
+merged_mri_with_test <- cbind(merged_metadata_mri, test)
+ggplot(data=merged_mri_with_test, aes(x=Right_SurfArea_DKT_parstriangularis, 
+                                 y=ENSG00000243449))+
+  geom_smooth(method = 'lm')+
+  scale_y_continuous(trans='log10')+
+  geom_point()
+model <- lm(data=merged_mri_with_test, ENSG00000243449 ~ Right_SurfArea_DKT_parstriangularis + 
+             msex + 
+             cogdx + 
+             AlignmentSummaryMetrics__PCT_PF_READS_ALIGNED + 
+             RnaSeqMetrics__PCT_INTERGENIC_BASES)
+p_values <- summary(model)$coefficients[, "Pr(>|t|)"]
+adjusted_p_values <- p.adjust(p_values, method = "BH")
+
+
+averagebyprep <- merged_mri_with_test %>%
+  group_by(sequencingBatch) %>%
+  summarize(across(ENSG00000243449, mean))
+ggplot(data=merged_mri_with_test, aes(y=ENSG00000243449, x=libraryPrep))+
+  geom_bar()
+```
+
+```{r}
+dif1 <- differences %>%
+  arrange(desc(dif)) %>%
+  head(10)
+dif2 <- differences %>%
+  arrange(dif) %>%
+  head(10)
+for (i in dif1$Row.names){
+  test <- genedata[rownames(genedata) == i,, drop = FALSE]
+  test <- as.data.frame(t(test))
+  merged_mri_with_test <- cbind(merged_metadata_mri, test)
+
+  p1 <- ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                   y=Right_SurfArea_DKT_parstriangularis))+
+    geom_point(aes(color = paste(i)))+
+    scale_color_gradient(low = "gray", high = "red")+
+    #geom_smooth(method = 'lm')+
+    ggtitle(paste(i))
+  p2 <- ggplot(merged_mri_with_test, aes(x=Right_ThickAvg_DKT_parstriangularis, 
+                                   y=i))+
+    geom_smooth(method = 'lm')+
+    geom_point()
+  p3 <- ggplot(merged_mri_with_test, aes(x=Right_SurfArea_DKT_parstriangularis, 
+                                   y=i))+
+    geom_smooth(method = 'lm')+
+    geom_point()
+  print(p1)
+  print(p2)
+  print(p3)
+}
+```
+
+```{r}
+metamrimale <- subset(merged_metadata_mri, msex == 1)
+male_specimenID <- intersect(colnames(genedata), metamrimale$specimenID)
+genesmale <- genedata[, male_specimenID, drop = FALSE]
+design <- model.matrix(~ Right_ThickAvg_DKT_parstriangularis + educ, data = metamrimale)
+
+fit <- lmFit(genesmale, design = design)
+
+contrast_matrix <- makeContrasts(
+  Right_ThickAvg_DKT_parstriangularis = 
+    Right_ThickAvg_DKT_parstriangularis - mean(Right_ThickAvg_DKT_parstriangularis),
+  educ = educ - mean(educ),
+  levels = design
+)
+
+fit <- contrasts.fit(fit, contrast_matrix)
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_ThickAvg_DKT_parstriangularis", number = nrow(genesmale))
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right Parstriangularis Thickness - Male") +
+  theme_minimal()
+```
+```{r}
+metamrifemale <- subset(merged_metadata_mri, msex == 0)
+female_specimenID <- intersect(colnames(genedata), metamrifemale$specimenID)
+genesfemale <- genedata[, female_specimenID, drop = FALSE]
+design <- model.matrix(~ 0 + Right_ThickAvg_DKT_parstriangularis + educ, data = metamrifemale)
+
+fit <- lmFit(genesfemale, design = design)
+
+contrast_matrix <- makeContrasts(
+  Right_ThickAvg_DKT_parstriangularis = 
+    Right_ThickAvg_DKT_parstriangularis - mean(Right_ThickAvg_DKT_parstriangularis),
+  educ = educ - mean(educ),
+  levels = design
+)
+
+fit <- contrasts.fit(fit, contrast_matrix)
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Right_ThickAvg_DKT_parstriangularis", number = nrow(genesfemale))
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Right Parstriangularis Thickness - Female") +
+  theme_minimal()
+```
+
+```{r}
+merged_metadata_mri_long <- merged_metadata_mri %>%
+  dplyr::select(where(is.numeric)) %>%
+  pivot_longer(cols = -c(msex), names_to = 'Variable', values_to = 'Value') %>%
+  filter(!is.na(Value))
+
+comparison <- merged_metadata_mri_long %>%
+  group_by(Variable) %>%
+  summarize(
+    Mean_Male = mean(Value[msex == 1], na.rm = TRUE),
+    Mean_Female = mean(Value[msex == 0], na.rm = TRUE),
+    Difference = ((Mean_Male - Mean_Female)/(Mean_Male+Mean_Female))*100
+  ) %>%
+  arrange(abs(Difference), .by_group = TRUE)
+```
+
+```{r}
+design <- model.matrix(~ 0 + Left_ThickAvg_DKT_parstriangularis + msex + educ + cogdx + ceradsc, data = merged_metadata_mri)
+
+fit <- lmFit(genedata, design = design)
+
+contrast_matrix <- makeContrasts(
+  Left_ThickAvg_DKT_parstriangularis = 
+    Left_ThickAvg_DKT_parstriangularis - mean(Left_ThickAvg_DKT_parstriangularis),
+  msex = msex - mean(msex),
+  educ = educ - mean(educ),
+  cogdx = cogdx - mean(cogdx),
+  levels = design
+)
+
+fit <- contrasts.fit(fit, contrast_matrix)
+fit <- eBayes(fit)
+
+# Step 5: Extract Results
+results <- topTable(fit, coef = "Left_ThickAvg_DKT_parstriangularis", number = nrow(genedata))
+
+ggplot(results, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(color = ifelse(results$P.Value < 0.05 & abs(results$logFC) > 1, "red", "black"), alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +  # Add a horizontal line for adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +  # Add vertical lines for log fold change threshold
+  labs(x = "Log2 Fold Change", y = "-log10(Adjusted P-Value)", title = "Differential Expression - Left Parstriangularis Thickness") +
+  theme_minimal()
+```
